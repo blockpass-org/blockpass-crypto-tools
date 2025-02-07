@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BP KYCC Decrypt</title>
+</head>
+<style>
+  body {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    /* Ensure full viewport height */
+    font-family: sans-serif;
+    background-color: #f0f0f0;
+    /* Light background */
+  }
+
+  .container {
+    background-color: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    /* Subtle shadow */
+    text-align: center;
+    /* Center text within the container */
+    width: 400px;
+  }
+
+  input[type="file"] {
+    margin-bottom: 10px;
+  }
+
+  button {
+    padding: 10px 20px;
+    background-color: #2196F3;
+    /* Green */
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  button:hover {
+    background-color: #1E88E5;
+    /* Darker green on hover */
+  }
+
+  #output {
+    margin-top: 20px;
+    border: 1px solid #ccc;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-wrap: break-word;
+    /* Prevents long lines from overflowing */
+    min-height: 50px;
+    /* Ensure a minimum height for output */
+    text-align: left;
+    /* Align text within output to the left */
+  }
+
+  .error {
+    color: red;
+  }
+
+  .input-group {
+    display: flex;
+    /* Use flexbox for alignment */
+    align-items: center;
+    /* Vertically align items */
+    margin-bottom: 10px;
+    /* Space between input groups */
+  }
+
+  /* Optional: Style the file input buttons */
+  input[type="file"]::-webkit-file-upload-button {
+    background-color: #eee;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+
+  label {
+    width: 120px;
+    /* Adjust width as needed */
+    text-align: left;
+    /* Align label text to the left */
+    margin-right: 10px;
+    /* Space between label and input */
+    font-weight: bold;
+  }
+</style>
+
+<body>
+
+  <div class="container">
+
+    <h1>BP KYCC Decrypt</h1>
+
+    <div class="input-group">
+      <label for="encryptedFile">Encrypted file (zipped.bin)</label>
+      <input type="file" id="encryptedFile" accept=".bin"><br><br>
+    </div>
+
+
+    <div class="input-group">
+      <label for="metadataFile">Metadata file (meta.json)</label>
+      <input type="file" id="metadataFile" accept=".json"><br><br>
+    </div>
+
+    <div class="input-group">
+      <label for="privateKeyFile">Private key file (key.pem)</label>
+      <input type="file" id="privateKeyFile" accept=".pem"><br><br>
+    </div>
+
+    <button onclick="decryptFile()">Decrypt</button><br><br>
+
+    <div id="output"></div>
+  </div>
+</body>
+
+<script>
+  async function decryptFile() {
+    const encryptedFile = document.getElementById('encryptedFile').files[0];
+    const metadataFile = document.getElementById('metadataFile').files[0];
+    const privateKeyFile = document.getElementById('privateKeyFile').files[0];
+
+    if (!encryptedFile || !metadataFile || !privateKeyFile) {
+      displayMessage("Please select all required files.");
+      return;
+    }
+
+    try {
+      const metadata = JSON.parse(await readFile(metadataFile));
+      const wrappedKeyBase64 = metadata.wrappedKey;
+      const ivHex = metadata.iv;
+      const checksum = metadata.zipContentSHA256;
+
+      const wrappedKey = base64ToArrayBuffer(wrappedKeyBase64);
+      const iv = hexToArrayBuffer(ivHex);
+
+      const pemKeyBytes = await readFileBytes(privateKeyFile);
+      const privateKeyBuffer = extractPemPrivateKey(pemKeyBytes);
+      const privateKey = await crypto.subtle.importKey(
+        "pkcs8",
+        privateKeyBuffer,
+        {
+          name: "RSA-OAEP",
+          hash: "SHA-1",
+        },
+        false,
+        ['decrypt']
+      );
+
+      const decryptedKeyBytes = await crypto.subtle.decrypt(
+        { name: 'RSA-OAEP' },
+        privateKey,
+        wrappedKey
+      );
+
+      const decryptedKey = hexToArrayBuffer(new TextDecoder().decode(decryptedKeyBytes));
+
+      const aesKeyObj = await crypto.subtle.importKey(
+        "raw",
+        decryptedKey,
+        { name: "AES-CBC" },
+        false,
+        ["decrypt"]
+      );
+
+
+      const encryptedFileBytes = await readFileBytes(encryptedFile);
+
+      const decryptedData = await crypto.subtle.decrypt(
+        { name: 'AES-CBC', iv: iv },
+        aesKeyObj,
+        encryptedFileBytes
+      );
+
+      const decryptedArray = new Uint8Array(decryptedData);
+
+      const zipChecksum = await calculateSHA256(decryptedArray);
+
+      displayMessage("Decryption successful.");
+
+      if (zipChecksum === checksum) {
+        displayMessage("Checksum: MATCHED");
+        displayMessage("- Checksum: " + checksum);
+        displayMessage("- Decoded: " + zipChecksum);
+      } else {
+        displayMessage("Checksum: MISSMATCHED");
+        displayMessage("- Checksum: " + checksum);
+        displayMessage("- Decoded: " + zipChecksum);
+      }
+
+      // Download the decrypted file (optional)
+      const blob = new Blob([decryptedArray]);
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = "decrypted_file.zip"; // Or appropriate file name
+      link.click();
+
+
+    } catch (error) {
+      displayMessage("Error: " + error.message);
+      console.error(error);
+    }
+  }
+
+
+  function displayMessage(message, isError = false) {
+    const outputDiv = document.getElementById('output');
+    const messageElement = document.createElement('div');
+    messageElement.textContent = message;
+    if (isError) {
+      messageElement.classList.add('error');
+    }
+    outputDiv.appendChild(messageElement);
+  }
+  function readFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (event) => resolve(event.target.result);
+      reader.onerror = (error) => reject(error);
+      reader.readAsText(file);
+    });
+  }
+
+  function readFileBytes(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (event) => resolve(event.target.result);
+      reader.onerror = (error) => reject(error);
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  function extractPemPrivateKey(file) {
+    const decoder = new TextDecoder();
+    const rawText = decoder.decode(file);
+    const pemContents = rawText.replace(/-----BEGIN.*?-----/g, '').replace(/-----END.*?-----/g, '').replace(/\s/g, '');
+    const decoded = atob(pemContents);
+    const buffer = new Uint8Array(decoded.length);
+    for (let i = 0; i < decoded.length; i++) {
+      buffer[i] = decoded.charCodeAt(i);
+    }
+    return buffer
+  }
+
+
+  function base64ToArrayBuffer(base64) {
+    const binaryString = atob(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  function hexToArrayBuffer(hex) {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < hex.length; i += 2) {
+      bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+    }
+    return bytes;
+  }
+
+
+  async function calculateSHA256(data) {
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return hashHex;
+  }
+
+</script>
+
+</html>
